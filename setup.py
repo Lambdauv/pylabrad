@@ -15,7 +15,7 @@ Operating System :: OS Independent
 Programming Language :: Python
 Topic :: Scientific/Engineering"""
 
-from distutils.core import setup
+from setuptools import setup
 
 doclines = __doc__.split('\n')
 
