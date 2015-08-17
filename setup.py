@@ -15,7 +15,7 @@ Operating System :: OS Independent
 Programming Language :: Python
 Topic :: Scientific/Engineering"""
 
-from distutils.core import setup
+from setuptools import setup
 
 doclines = __doc__.split('\n')
 
@@ -26,14 +26,14 @@ setup(
     author_email = 'maffoo@users.sourceforge.net',
     license = 'http://www.gnu.org/licenses/gpl-2.0.html',
     platforms = ['ANY'],
-    
+
     url = 'http://sourceforge.net/projects/pylabrad/',
     download_url = '',
-    
+
     description = doclines[0],
     long_description = '\n'.join(doclines[2:]),
     classifiers = classifications.split('\n'),
-    
+
     requires = ['twisted (>=2.5)'],
     provides = ['labrad'],
     packages = [
