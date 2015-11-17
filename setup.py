@@ -34,7 +34,10 @@ setup(
     long_description = '\n'.join(doclines[2:]),
     classifiers = classifications.split('\n'),
 
-    requires = ['twisted (>=2.5)'],
+    install_requires = [
+        'twisted>=2.5',
+        'pyOpenSSL'
+    ],
     provides = ['labrad'],
     packages = [
         'labrad',
@@ -47,8 +50,5 @@ setup(
         'labrad': ['LICENSE.txt'],
         'labrad.node': ['*.ini'],
         },
-    py_modules = [
-        'twisted.plugins.labrad_node',
-        ],
-    scripts = ['labrad_postinstall.py'],
+    scripts = [],
     )
