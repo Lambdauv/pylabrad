@@ -52,8 +52,8 @@ class StatefulDeviceServerWrapper(object):
         self._server.select_device(self._device)
         return getattr(self._server, attr)
 
-    def _getAttributeNames(self):
-        return sorted(set(self._server._getAttributeNames() + dir(self._server)))
+    def __dir__(self):
+        return dir(self._server)
 
     def __repr__(self):
         return ("Stateful wrapper for device '{}' for:\n".format(self._device) +
