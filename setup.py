@@ -33,7 +33,7 @@ setup(
     description = doclines[0],
     long_description = '\n'.join(doclines[2:]),
     classifiers = classifications.split('\n'),
-
+    
     install_requires = [
         'twisted>=2.5',
         'pyOpenSSL'
