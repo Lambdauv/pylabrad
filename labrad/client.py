@@ -219,11 +219,12 @@ class HasDynamicAttrs(object):
         if now:
             self._refresh()
 
-    def _getAttributeNames(self):
-        """Return a list of dynamic attributes, for tab-completion"""
+    def __dir__(self):
+        """Return a list of attributes for tab-completion.
+        """
         self.refresh() # force refresh so the list is current
-        return sorted(self._attrs.keys())
-
+        return sorted(set(self._attrs.keys() + self.__dict__.keys() + dir(type(self))))
+    
     def __getattr__(self, key):
         return self._attrs[key]
 
@@ -510,8 +511,10 @@ class Client(HasDynamicAttrs):
     def connected(self):
         return self._backend.connected
 
-    def connect(self, host, port=C.MANAGER_PORT, timeout=C.TIMEOUT, password=None):
-        self._backend.connect(host, port=port, timeout=timeout, password=password)
+    def connect(self, host, port=None, timeout=C.TIMEOUT, password=None,
+                tls=C.MANAGER_TLS):
+        self._backend.connect(host, port=port, timeout=timeout,
+                              password=password, tls=tls)
 
     def disconnect(self):
         self._backend.disconnect()

@@ -68,38 +68,41 @@ For rsyslogd on ubuntu, create the following file:
 
 from __future__ import with_statement
 
-import os
-import sys
-import socket
-from datetime import datetime
 from ConfigParser import SafeConfigParser
-import StringIO
-import zipfile
+from datetime import datetime
 import logging
 import logging.handlers
+import os
+import shlex
+import socket
+import StringIO
+import sys
+import zipfile
 
-import labrad
-from labrad import util, types as T, constants as C
-from labrad.server import ILabradServer, LabradServer, setting
-from labrad.util import dispatcher, findEnvironmentVars, interpEnvironmentVars
-import labrad.support
-
-from twisted.application.service import IService, MultiService
+from twisted.application.service import MultiService
 from twisted.application.internet import TCPClient
 from twisted.internet import defer, reactor
 from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.internet.protocol import ProcessProtocol
 from twisted.internet.error import ProcessDone, ProcessTerminated
-from twisted.python import log, failure, usage
+from twisted.python import usage
 from twisted.python.runtime import platformType
-from twisted.python.components import registerAdapter
 from twisted.plugin import getPlugins
 from zope.interface import Interface, implements
 
+import labrad
+from labrad import util, types as T, constants as C
+from labrad.server import ILabradServer, LabradServer, setting
+import labrad.support
+from labrad.util import dispatcher, findEnvironmentVars, interpEnvironmentVars
+
+
 LOG_LENGTH = 1000 # maximum number of lines of stdout to keep per server
+
 
 class IServerProcess(Interface):
     pass
+
 
 class ServerProcess(ProcessProtocol):
     """A class to represent a running server instance."""
@@ -112,15 +115,15 @@ class ServerProcess(ProcessProtocol):
         self.env.update(env, DIR=self.path, FILE=self.filename)
         cls = self.__class__
         self.name = interpEnvironmentVars(cls.instancename, self.env)
-        # TODO allow for spaces in args by doing a proper split here
-        self.args = self.cmdline.split()
+        self.args = shlex.split(self.cmdline)
         self.args = [interpEnvironmentVars(a, self.env) for a in self.args]
         self.starting = False
         self.started = False
         self.stopping = False
         self.output = []
         self._lock = defer.DeferredLock()
-        self.logger = logging.getLogger('labrad.' + labrad.support.mangle(self.name))
+        logname = 'labrad.' + labrad.support.mangle(self.name)
+        self.logger = logging.getLogger(logname)
 
     @property
     def status(self):
@@ -168,9 +171,10 @@ class ServerProcess(ProcessProtocol):
         # Twisted spawnProcess only supports posix (including Mac) and
         # win32, so we just abandon anything else.
         # Relevant code is in twisted/internet/process.py:_BaseProcess and
-        # twisted/internet/dumbwin32proc.py:Process.  The twisted docs
-        # at http://twistedmatrix.com/documents/current/api/twisted.internet.interfaces.IReactorProcess.spawnProcess.html say that the full executable path is required, but
-        # this is not true.
+        # twisted/internet/dumbwin32proc.py:Process. The twisted docs for
+        # spawnProcess say that the full executable path is required, but
+        # this is not in fact the case. See:
+        # http://twistedmatrix.com/documents/current/api/twisted.internet.interfaces.IReactorProcess.spawnProcess.html
         if platformType == 'posix':
             executable = self.args[0]
         elif platformType == 'win32':
@@ -206,12 +210,9 @@ class ServerProcess(ProcessProtocol):
         self.emitMessage('server_stopping')
         # hack: marker to tell the kill func that it worked
         finished = [False]
-        #print 'calling kill...'
         self.kill(finished)
-        #print 'killing'
         yield self.shutdown
         finished[0] = True
-        #print 'killed'
         self.stopping = False
         self.emitMessage('server_stopped')
 
@@ -292,10 +293,9 @@ class ServerProcess(ProcessProtocol):
             # if we're not dead yet, kill with a vengeance
             if self.started:
                 self.proc.signalProcess('KILL')
-        except:
-            msg = 'Error while trying to kill server process for "%s":'
-            print msg % self.name
-            failure.Failure().printTraceback(elideFrameworkCode=1)
+        except Exception:
+            logging.error('Error while trying to kill server process for "%s":' % self.name,
+                          exc_info=True)
 
     def outReceived(self, data):
         """Called when the server prints to stdout."""
@@ -312,6 +312,7 @@ class ServerProcess(ProcessProtocol):
     def clearOutput(self):
         """Clear the log of stdout."""
         self.output = []
+
 
 def findConfigBlock(path, filename):
     """Find a Node configuration block embedded in a file."""
@@ -387,6 +388,7 @@ def createGenericServerCls(path, filename, conf):
 
     return cls
 
+
 def createPythonServerCls(plugin):
     """Create a ServerProcess class representing a python server.
 
@@ -426,6 +428,7 @@ def createPythonServerCls(plugin):
 
     return cls
 
+
 class Node(MultiService):
     """Parent Service that keeps the node running.
 
@@ -435,11 +438,12 @@ class Node(MultiService):
     """
     reconnectDelay = 10
 
-    def __init__(self, name, host, port):
+    def __init__(self, name, host, port, tls=C.MANAGER_TLS):
         MultiService.__init__(self)
         self.name = name
         self.host = host
         self.port = port
+        self.tls = tls
 
     def startService(self):
         MultiService.startService(self)
@@ -449,6 +453,7 @@ class Node(MultiService):
         """Attempt to start the node and connect to LabRAD."""
         print 'Connecting to %s:%d...' % (self.host, self.port)
         node = NodeServer(self.name, self.host, self.port)
+        node.configure_tls(self.host, self.tls)
         node.onStartup().addErrback(self._error)
         node.onShutdown().addCallbacks(self._disconnected, self._error)
         self.cxn = TCPClient(self.host, self.port, node)
@@ -475,9 +480,20 @@ class Node(MultiService):
         reactor.callLater(self.reconnectDelay, self.startConnection)
         print 'Will try to reconnect in %d seconds...' % self.reconnectDelay
 
+
 class NodeConfig(object):
-    """Load configuration from the registry and monitor it for changes."""
-    # TODO add to config: autostarting, refreshinterval, preferred start location
+    """Load configuration from the registry and monitor it for changes.
+
+    Attributes:
+        dirs (list(string)): a list of directories that will be searched for
+            runnable servers.
+        exts (list(string)): a list of file extensions that will be included
+            when searching for servers.
+        mods (list(string)): a list of python modules that will be searched for
+            runnable servers using twisted's plugin mechanism. TODO: remove this
+        autostart (list(string)): a list of servers that will be automatically
+            started when the node launches.
+    """
 
     @classmethod
     @inlineCallbacks
@@ -511,7 +527,7 @@ class NodeConfig(object):
 
         # load defaults (creating them if necessary)
         create = '__default__' not in dirs
-        defaults = ([], ['labrad.servers'], ['.ini', '.py'], '')
+        defaults = ([], ['labrad.servers'], ['.ini', '.py'], [])
         defaults = yield self._load('__default__', create, defaults)
 
         # load this node (creating config if necessary)
@@ -531,8 +547,9 @@ class NodeConfig(object):
 
     def _update(self, config, triggerRefresh=True):
         """Update instance variables from loaded config."""
-        self.dirs, self.mods, self.extensions  = config
-        print 'config updated:', self.dirs, self.mods, self.extensions
+        self.dirs, self.mods, self.extensions, self.autostart = config
+        print 'config updated: dirs={}, modules={}, extensions={}, autostart={}'.format(
+                self.dirs, self.mods, self.extensions, self.autostart)
         if triggerRefresh:
             self.parent.refreshServers()
 
@@ -546,14 +563,19 @@ class NodeConfig(object):
             p.set('directories', defaults[0])
             p.set('packages', defaults[1])
             p.set('extensions', defaults[2])
+            p.set('autostart', defaults[3])
         p.get('directories', '*s', key='dirs')
         p.get('packages', '*s', key='mods')
         p.get('extensions', '*s', key='exts')
+        p.get('autostart', '*s', True, [], key='autostart')
         ans = yield p.send()
-        dirs = filter(None, ans.dirs)
-        mods = filter(None, ans.mods)
-        exts = filter(None, ans.exts)
-        returnValue((dirs, mods, exts))
+        def remove_empties(strs):
+            return [s for s in strs if s]
+        dirs = remove_empties(ans.dirs)
+        mods = remove_empties(ans.mods)
+        exts = remove_empties(ans.exts)
+        autostart = sorted(remove_empties(ans.autostart))
+        returnValue((dirs, mods, exts, autostart))
 
     def _save(self):
         """Save the current configuration to the registry."""
@@ -566,8 +588,24 @@ class NodeConfig(object):
     @inlineCallbacks
     def _handleMessage(self, c, msg):
         """Reload when we get a message from the registry."""
-        config = yield self._load()
-        self._update(config)
+        try:
+            config = yield self._load()
+            self._update(config)
+        except Exception:
+            logging.error('Error in _handleMessage', exc_info=True)
+
+    @inlineCallbacks
+    def update_autostart(self, autostart):
+        """Update the list of servers to be autostarted.
+
+        Args:
+            autostart (list(string)): New list of autostart server names. This
+                will completely replace the current list.
+        """
+        p = self._packet()
+        p.cd(['', 'Nodes', self.nodename])
+        p.set('autostart', sorted(autostart))
+        yield p.send()
 
 
 class NodeServer(LabradServer):
@@ -585,18 +623,19 @@ class NodeServer(LabradServer):
         self.name = 'node %s' % nodename
         self.host = host
         self.port = port
-
-    @inlineCallbacks
-    def initServer(self):
-        """Initialize this server."""
         self.servers = {}
         self.instances = {}
         self.starters = {}
         self.runners = {}
         self.stoppers = {}
         self.initMessages(True)
+
+    @inlineCallbacks
+    def initServer(self):
+        """Initialize this server."""
         self.config = yield NodeConfig.create(self)
         self.refreshServers()
+        self.autostart(None)
 
     def stopServer(self):
         """Stop this node by killing all subprocesses."""
@@ -614,7 +653,7 @@ class NodeServer(LabradServer):
         def f(receiver, signal):
             try:
                 method(receiver, signal)
-            except Exception, e:
+            except dispatcher.DispatcherError as e:
                 msg = 'Error while setting up message dispatching. receiver={0}, method={1}, signal={2}.'
                 print msg.format(receiver, attr, signal), e
         # set up messages to be relayed out over LabRAD
@@ -692,8 +731,8 @@ class NodeServer(LabradServer):
                     if s.name not in servers:
                         servers[s.name] = s
             except:
-                print 'Error while loading plugins from module "%s":' % module
-                failure.Failure().printTraceback(elideFrameworkCode=1)
+                logging.error('Error while loading plugins from module "%s":' % module,
+                              exc_info=True)
         # look for .ini files
         for dirname in self.config.dirs:
             for path, dirs, files in os.walk(dirname):
@@ -729,8 +768,8 @@ class NodeServer(LabradServer):
                             servers[s.name] = s
                     except:
                         fname = os.path.join(path, f)
-                        print 'Error while loading config file "%s":' % fname
-                        failure.Failure().printTraceback(elideFrameworkCode=1)
+                        logging.error('Error while loading config file "%s":' % fname,
+                                  exc_info=True)
         self.servers = servers
         # send a message with the current server list
         dispatcher.send('status', servers=self.status())
@@ -833,6 +872,49 @@ class NodeServer(LabradServer):
         """
         pass
 
+    @setting(200, returns='')
+    def autostart(self, c):
+        """Start all servers from the configured autostart list.
+
+        Any servers that are already running will be left as is, while those
+        that are not yet running will be started. Autostart is triggered when
+        the node first starts up, but can be invoked manually at any time
+        thereafter.
+        """
+        running = set(s.__class__.name for s in self.runners.values())
+        to_start = [name for name in self.config.autostart
+                         if name not in running]
+        deferreds = [(name, self.start(c, name)) for name in to_start]
+        for name, deferred in deferreds:
+            try:
+                yield deferred
+            except Exception:
+                logging.error('Failed to autostart "%s"', name, exc_info=True)
+
+    @setting(201, returns='*s')
+    def autostart_list(self, c):
+        """Get the list of servers that are configured to be autostarted."""
+        return self.config.autostart
+
+    @setting(202, name='s', returns='')
+    def autostart_add(self, c, name):
+        """Add a server to the autostart list."""
+        if name not in self.servers:
+            raise Exception("Unknown server: '%s'." % name)
+        autostart = set(self.config.autostart)
+        autostart.add(name)
+        yield self.config.update_autostart(sorted(autostart))
+
+    @setting(203, name='s', returns='')
+    def autostart_remove(self, c, name):
+        """Remove a server from the autostart list."""
+        autostart = set(self.config.autostart)
+        try:
+            autostart.remove(name)
+        except KeyError:
+            pass
+        yield self.config.update_autostart(sorted(autostart))
+
     @setting(1000, returns='*(ss)')
     def node_version(self, c):
         """Return a list of key-value tuples containing info about this node."""
@@ -846,65 +928,80 @@ class NodeServer(LabradServer):
             }
         return list(info.items())
 
+
 class NodeOptions(usage.Options):
-    optParameters = [['name', 'n', util.getNodeName(), 'Node name.'],
-                     ['port', 'p', C.MANAGER_PORT, 'Manager port.'],
-                     ['host', 'h', C.MANAGER_HOST, 'Manager location.'],
-                     ['logfile', 'l', None, 'Enable logging to a file'],
-                     ['syslog_socket', 'x', None, 'Override default syslog socket.  absolute path or host[:port]']]
+    optParameters = [
+            ['name', 'n', util.getNodeName(), 'Node name.'],
+            ['port', 'p', C.MANAGER_PORT, 'Manager port.'],
+            ['host', 'h', C.MANAGER_HOST, 'Manager location.'],
+            ['tls', '', C.MANAGER_TLS,
+             'TLS mode for connecting to manager (on/starttls/off)'],
+            ['logfile', 'l', None, 'Enable logging to a file'],
+            ['syslog_socket', 'x', None,
+             'Override default syslog socket. Absolute path or host[:port]']]
     optFlags = [['syslog', 's', 'Enable syslog'],
                 ['verbose', 'v', 'Enable debug output']]
-    
+
+
 def makeService(options):
     """Construct a TCPServer from a LabRAD node."""
     name = options['name']
     host = options['host']
     port = int(options['port'])
-    return Node(name, host, port)
+    tls = C.check_tls_mode(options['tls'])
+    return Node(name, host, port, tls)
+
 
 def setup_logging(options):
     logging.basicConfig()
     node_log = logging.getLogger('labrad')
     if options['syslog']:
-        # We need to find the path to the system log socket, which varies by platform
+        # We need to find the path to the system log socket, which varies by
+        # platform. Linux and OS/X defaults are listed below. On windows the
+        # only option is UDP logging, but since UDP is connectionless there is
+        # no way to tell if there is actually a syslog daemon listening.
         # https://docs.python.org/2/library/logging.handlers.html#sysloghandler
-        # Linux and OS/X defaults are listed below.
-        # On windows you will have to use UDP logging.  Because UDP is connectionless,
-        # there is no way to tell if there is actually a syslog daemon listening.
         if options['syslog_socket']:
-            if "/" in options['syslog_socket']:
+            if '/' in options['syslog_socket']:
                 address = options['syslog_socket']
             else:
                 host, _, port = options['syslog_socket'].partition(':')
-                if port == "":
+                if port == '':
                     address = (host, 514)
                 else:
                     address = (host, int(port))
-            syslog_handler = logging.handlers.SysLogHandler(address=address)
         elif sys.platform.startswith('linux'):
-            syslog_handler = logging.handlers.SysLogHandler(address='/dev/log')
+            address = '/dev/log'
         elif sys.platform.startswith('darwin'):
-            syslog_handler = logging.handlers.SysLogHandler(address='/var/run/syslog')
+            address = '/var/run/syslog'
         else:
-            node_log.critical("Syslog specified, but default socket not known for platform {}.  Use -s option".format(sys.platform))
+            node_log.critical(
+                    'Syslog specified, but default socket not known for '
+                    'platform {}. Use -s option'.format(sys.platform))
             sys.exit(1)
+        syslog_handler = logging.handlers.SysLogHandler(address=address)
         syslog_handler.setFormatter(logging.Formatter('%(name)s: %(message)s'))
         node_log.addHandler(syslog_handler)
     if options['logfile']:
-        file_handler = logging.handlers.RotatingFileHandler(options['logfile'], maxBytes=800000, backupCount=5)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s: %(message)s',
-                                                    datefmt='%Y-%m-%d %H:%M:%S'))
+        file_handler = logging.handlers.RotatingFileHandler(
+                options['logfile'], maxBytes=800000, backupCount=5)
+        formatter = logging.Formatter('%(asctime)s - %(name)s: %(message)s',
+                                      datefmt='%Y-%m-%d %H:%M:%S')
+        file_handler.setFormatter(formatter)
         node_log.addHandler(file_handler)
-    if config['verbose']:
+    if options['verbose']:
         node_log.setLevel(logging.DEBUG)
     else:
         node_log.setLevel(logging.INFO)
-    
-if __name__ == '__main__':
+
+def main():
     config = NodeOptions()
     config.parseOptions()
     setup_logging(config)
-    logging.getLogger('labrad.node').info("Starting")
+    logging.getLogger('labrad.node').info('Starting')
     service = makeService(config)
     service.startService()
     reactor.run()
+
+if __name__ == '__main__':
+    main()
